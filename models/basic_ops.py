@@ -7,9 +7,6 @@ import math
 import torch as th
 import torch.nn as nn
 
-class SiLU(nn.Module):
-    def forward(self, x):
-        return x * th.sigmoid(x)
 
 
 class GroupNorm32(nn.GroupNorm):
@@ -69,14 +66,6 @@ def zero_module(module):
         p.detach().zero_()
     return module
 
-
-def scale_module(module, scale):
-    """
-    Scale the parameters of a module and return it.
-    """
-    for p in module.parameters():
-        p.detach().mul_(scale)
-    return module
 
 
 def mean_flat(tensor):

@@ -13,7 +13,7 @@ class Predictor(BasePredictor):
         """Load the model into memory to make running multiple predictions efficient"""
         self.configs = {
             "realsr": OmegaConf.load('./configs/realsr_swinunet_realesrgan256_journal.yaml'),
-            "bicsr": configs = OmegaConf.load('./configs/bicx4_swinunet_lpips.yaml'),
+            "bicsr": OmegaConf.load('./configs/bicx4_swinunet_lpips.yaml'),
         }
 
     def predict(

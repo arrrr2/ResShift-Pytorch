@@ -48,7 +48,9 @@ autoencoder:
   target: ldm.models.autoencoder.VQModelTorch
   ckpt_path: weights/autoencoder_vq_f4.pth
   use_fp16: True
+  tune_decoder: False
   params:
+    lora_tune_decoder: False
     embed_dim: 3
     n_embed: 8192
     ddconfig:
@@ -99,8 +101,8 @@ data:
     params:
       dir_paths: []
       txt_file_path: [
-                      '/mnt/sfs-common/zsyue/database/ImageNet/files_txt/path_train_all.txt', 
-                      '/mnt/sfs-common/zsyue/database/FFHQ/files_txt/files256.txt',
+                      '/home/ubuntu/data/datasets/ffhq256_10000.txt', 
+                      '/home/ubuntu/data/datasets/imagenet256.txt',
                      ] 
       im_exts: ['JPEG', ]
       io_backend:
@@ -152,7 +154,7 @@ train:
   warmup_iterations: 5000
   # dataloader
   batch: [64, 8]                
-  microbatch: 8
+  microbatch: 16
   num_workers: 4
   prefetch_factor: 2            
   # optimization settings
