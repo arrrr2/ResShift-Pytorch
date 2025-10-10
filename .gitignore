@@ -1,3 +1,5 @@
 weights/
 results/
 *.yaml
+.vscode/
+*.pyc
