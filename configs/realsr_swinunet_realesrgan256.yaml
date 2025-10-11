@@ -154,7 +154,7 @@ train:
   warmup_iterations: 5000
   # dataloader
   batch: [64, 8]                
-  microbatch: 16
+  microbatch: 32
   num_workers: 4
   prefetch_factor: 2            
   # optimization settings
@@ -162,7 +162,7 @@ train:
   ema_rate: 0.999
   iterations: 500000            # total iterations
   # save logging
-  save_freq: 500000              
+  save_freq: 50000           
   log_freq: [200, 2000, 1]         # [training loss, training images, val images]
   local_logging: True           # manually save images
   tf_logging: False             # tensorboard logging
@@ -178,5 +178,5 @@ train:
   global_seeding: False
   # model compile
   compile:
-    flag: False
-    mode: reduce-overhead      # default, reduce-overhead
+    flag: True
+    mode: reduce-overhead     # default, reduce-overhead
