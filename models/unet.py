@@ -1179,3 +1179,50 @@ class UNetModelConv(nn.Module):
         out = self.out(h)
         return out
 
+
+
+if __name__ == '__main__':
+    import yaml
+    from pathlib import Path
+    import torch._dynamo as dynamo
+
+    # 1. 读取并解析 YAML 配置文件
+    config_path = Path('configs/realsr_swinunet_realesrgan256.yaml')
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+
+    model_params = config['model']['params']
+
+    # 2. 创建模型实例
+    model = UNetModelSwin(**model_params)
+    model = model.cuda().eval()
+
+    # 3. 生成模拟输入
+    image_size = model_params['image_size']
+    lq_size = model_params['lq_size']
+    batch_size = 1 
+    
+    x = th.randn(batch_size, 3, image_size, image_size).cuda()
+    timesteps = th.randint(0, 1000, (batch_size,)).cuda()
+    lq = th.randn(batch_size, 3, lq_size, lq_size).cuda()
+
+    # 4. 分析图断裂
+    print("Analyzing graph breaks for UNetModelSwin...")
+    
+    explain_output = dynamo.explain(model, x, timesteps, lq)
+
+    print("\n" + "="*20 + " TorchDynamo `explain` results " + "="*20)
+
+    output = str(explain_output)[:20000]
+    print(output)
+    print("="*60 + "\n")
+
+    print("Running the model with torch.compile to verify...")
+    # # 5. 使用 torch.compile 编译并运行模型
+    # try:
+    #     compiled_model = th.compile(model, mode="reduce-overhead")
+    #     output = compiled_model(x, timesteps, lq)
+    #     print("Model compiled and executed successfully.")
+    #     print("Output shape:", output.shape)
+    # except Exception as e:
+    #     print(f"An error occurred during torch.compile: {e}")

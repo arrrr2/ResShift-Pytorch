@@ -1,5 +1,7 @@
 import numpy as np
 import torch as th
+import torch.nn as nn
+import weakref
 
 from .gaussian_diffusion import GaussianDiffusion, GaussianDiffusionDDPM
 
@@ -39,6 +41,7 @@ class SpacedDiffusion(GaussianDiffusion):
                 self.timestep_map.append(ii)
         kwargs["sqrt_etas"] = np.array(new_sqrt_etas)
         super().__init__(**kwargs)
+        self._wrap_cache = weakref.WeakKeyDictionary()
 
     def p_mean_variance(self, model, *args, **kwargs):  # pylint: disable=signature-differs
         return super().p_mean_variance(self._wrap_model(model), *args, **kwargs)
@@ -49,18 +52,31 @@ class SpacedDiffusion(GaussianDiffusion):
     def _wrap_model(self, model):
         if isinstance(model, _WrappedModel):
             return model
-        return _WrappedModel(model, self.timestep_map, self.original_num_steps)
+        wm = self._wrap_cache.get(model)
+        if wm is None:
+            wm = _WrappedModel(model, self.timestep_map, self.original_num_steps)
+            self._wrap_cache[model] = wm
+        return wm
 
-class _WrappedModel:
+class _WrappedModel(nn.Module):
     def __init__(self, model, timestep_map, original_num_steps):
-        self.model = model
-        self.timestep_map = timestep_map
-        self.original_num_steps = original_num_steps
+        super().__init__()
+        object.__setattr__(self, "_model", model)   # 或：self.__dict__["_model"] = model
 
-    def __call__(self, x, ts, **kwargs):
-        map_tensor = th.tensor(self.timestep_map, device=ts.device, dtype=ts.dtype)
-        new_ts = map_tensor[ts]
-        return self.model(x, new_ts, **kwargs)
+        self.original_num_steps = original_num_steps
+        self.register_buffer("_tmap_cpu", th.tensor(timestep_map, dtype=th.long),
+                             persistent=False)
+
+    def forward(self, x, ts, **kwargs):
+
+
+        ts_idx = ts.long()
+        tmap = self._tmap_cpu
+        if tmap.device != ts_idx.device:
+            tmap = tmap.to(device=ts_idx.device, non_blocking=True)
+
+        new_ts = tmap[ts_idx]
+        return self._model(x, new_ts, **kwargs)   # 用未注册的原模型调用
 
 class SpacedDiffusionDDPM(GaussianDiffusionDDPM):
     """

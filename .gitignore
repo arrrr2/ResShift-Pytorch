@@ -3,3 +3,4 @@ results/
 *.yaml
 .vscode/
 *.pyc
+*.svg

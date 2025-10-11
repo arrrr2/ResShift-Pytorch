@@ -260,7 +260,9 @@ class SwinTransformerBlock(nn.Module):
 
         # W-MSA/SW-MSA (to be compatible for testing on images whose shapes are the multiple of window size
         if self.input_resolution == x_size:
-            attn_windows = self.attn(x_windows, mask=self.attn_mask.to(x.dtype))  # (NW*B) x (Ws*Ws) x C
+            # For torch.compile compatibility: handle None mask properly
+            mask = self.attn_mask.to(x.dtype) if self.attn_mask is not None else None
+            attn_windows = self.attn(x_windows, mask=mask)  # (NW*B) x (Ws*Ws) x C
         else:
             attn_windows = self.attn(x_windows, mask=self.calculate_mask(x_size).to(x.device, x.dtype))
 
