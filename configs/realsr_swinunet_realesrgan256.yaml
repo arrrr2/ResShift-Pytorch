@@ -134,12 +134,14 @@ data:
     type: base
     params:
       dir_path: testdata/Val_SR/lq
+      # dir_path: /home/ubuntu/data/datasets/imagenet256_4xsr/lq
       im_exts: png
       transform_type: default
       transform_kwargs:
           mean: 0.5
           std: 0.5
       extra_dir_path: testdata/Val_SR/gt
+      # extra_dir_path: /home/ubuntu/data/datasets/imagenet256_4xsr/gt
       extra_transform_type: default
       extra_transform_kwargs:
           mean: 0.5
@@ -155,20 +157,20 @@ train:
   # dataloader
   batch: [64, 8]                
   microbatch: 32
-  num_workers: 4
+  num_workers: 8
   prefetch_factor: 2            
   # optimization settings
   weight_decay: 0               
   ema_rate: 0.999
   iterations: 500000            # total iterations
   # save logging
-  save_freq: 50000           
-  log_freq: [200, 2000, 1]         # [training loss, training images, val images]
+  save_freq: 100000         
+  log_freq: [200, 2000, 8]         # [training loss, training images, val images]
   local_logging: True           # manually save images
   tf_logging: False             # tensorboard logging
   # validation settings
   use_ema_val: True            
-  val_freq: ${train.save_freq}
+  val_freq: 5000
   val_y_channel: True
   val_resolution: ${model.params.lq_size}
   val_padding_mode: reflect
@@ -179,4 +181,4 @@ train:
   # model compile
   compile:
     flag: True
-    mode: reduce-overhead     # default, reduce-overhead
+    mode: reduce-overhead      # default, reduce-overhead
