@@ -28,6 +28,11 @@ from basicsr.data.degradations import random_add_gaussian_noise_pt, random_add_p
 class TrainerDifIR(TrainerBase):
     def setup_optimizaton(self):
         super().setup_optimizaton()
+        self.log_stream = torch.cuda.Stream()
+        self.data_stream = torch.cuda.Stream()
+        self.log_info_for_next_iter = None
+        self.loss_mean = None
+        self.loss_count = None
         
         def lr_lambda(step):
             warmup = self.configs.train.warmup_iterations
@@ -361,10 +366,14 @@ class TrainerDifIR(TrainerBase):
         return losses, z0_pred, z_t
 
     def training_step(self, data):
+        # print(self.log_info_for_next_iter)
+
+
         current_batchsize = data['gt'].shape[0]
         micro_batchsize = self.configs.train.microbatch
         num_grad_accumulate = math.ceil(current_batchsize / micro_batchsize)
 
+        log_info = None
         for jj in range(0, current_batchsize, micro_batchsize):
             
             torch.compiler.cudagraph_mark_step_begin()
@@ -421,8 +430,11 @@ class TrainerDifIR(TrainerBase):
 
             # make logging
             if last_batch:
-                self.log_step_train(losses, tt, micro_data, z_t, z0_pred.detach())
+                log_info = (losses, tt, micro_data, z_t, z0_pred.detach(), self.current_iters)
 
+        if self.log_stream is not None: torch.cuda.current_stream().wait_stream(self.log_stream)
+
+        
         if self.configs.train.use_amp:
             self.amp_scaler.step(self.optimizer)
             self.amp_scaler.update()
@@ -432,14 +444,21 @@ class TrainerDifIR(TrainerBase):
         # grad zero
         self.optimizer.zero_grad(set_to_none=True)
 
-        if hasattr(self.configs.train, 'ema_rate'):
-            self.update_ema_model()
+        if log_info is not None:
+            self.log_info_for_next_iter = log_info
+
+        if self.log_info_for_next_iter is not None:
+            with torch.cuda.stream(self.log_stream):
+                if hasattr(self.configs.train, 'ema_rate'):
+                    self.update_ema_model()
+                self.log_step_train(*self.log_info_for_next_iter)
 
     def adjust_lr(self, current_iters=None):
         if hasattr(self, 'lr_scheduler'):
             self.lr_scheduler.step()
 
-    def log_step_train(self, loss, tt, batch, z_t, z0_pred, phase='train'):
+    @torch.no_grad()
+    def log_step_train(self, loss, tt, batch, z_t, z0_pred, current_iters, phase='train'):
         '''
         param loss: a dict recording the loss informations
         param tt: 1-D tensor, time steps
@@ -448,10 +467,11 @@ class TrainerDifIR(TrainerBase):
             chn = batch['gt'].shape[1]
             num_timesteps = self.base_diffusion.num_timesteps
             record_steps = [1, (num_timesteps // 2) + 1, num_timesteps]
-            if self.current_iters % self.configs.train.log_freq[0] == 1:
+            if current_iters % self.configs.train.log_freq[0] == 1:
                 self.loss_mean = {key:torch.zeros(size=(len(record_steps),), dtype=torch.float64)
                                   for key in loss.keys()}
                 self.loss_count = torch.zeros(size=(len(record_steps),), dtype=torch.float64)
+            
             for jj in range(len(record_steps)):
                 for key, value in loss.items():
                     index = record_steps[jj] - 1
@@ -460,13 +480,13 @@ class TrainerDifIR(TrainerBase):
                     self.loss_mean[key][jj] += current_loss.item()
                 self.loss_count[jj] += mask.sum().item()
 
-            if self.current_iters % self.configs.train.log_freq[0] == 0:
+            if current_iters % self.configs.train.log_freq[0] == 0:
                 if torch.any(self.loss_count == 0):
                     self.loss_count += 1e-4
                 for key in loss.keys():
                     self.loss_mean[key] /= self.loss_count
                 log_str = 'Train: {:06d}/{:06d}, Loss/MSE: '.format(
-                        self.current_iters,
+                        current_iters,
                         self.configs.train.iterations)
                 for jj, current_record in enumerate(record_steps):
                     log_str += 't({:d}):{:.1e}/{:.1e}, '.format(
@@ -477,28 +497,47 @@ class TrainerDifIR(TrainerBase):
                 log_str += 'lr:{:.2e}'.format(self.optimizer.param_groups[0]['lr'])
                 self.logger.info(log_str)
                 self.logging_metric(self.loss_mean, tag='Loss', phase=phase, add_global_step=True)
-            if self.current_iters % self.configs.train.log_freq[1] == 0:
+            if current_iters % self.configs.train.log_freq[1] == 0:
                 self.logging_image(batch['lq'], tag='lq', phase=phase, add_global_step=False)
                 self.logging_image(batch['gt'], tag='gt', phase=phase, add_global_step=False)
-                x_t = self.base_diffusion.decode_first_stage(
-                        self.base_diffusion._scale_input(z_t, tt),
-                        self.autoencoder,
-                        )
+                
+                # 获取推理batch大小，从配置中获取，与validation中相同
+                inference_batch_size = self.configs.train.batch[1]
+                
+                # 分批处理 x_t
+                z_t_scaled = self.base_diffusion._scale_input(z_t, tt)
+                x_t_list = []
+                for i in range(0, z_t_scaled.shape[0], inference_batch_size):
+                    z_t_batch = z_t_scaled[i:i+inference_batch_size]
+                    x_t_batch = self.base_diffusion.decode_first_stage(
+                            z_t_batch,
+                            self.autoencoder,
+                            )
+                    x_t_list.append(x_t_batch)
+                x_t = torch.cat(x_t_list, dim=0)
                 self.logging_image(x_t, tag='diffused', phase=phase, add_global_step=False)
-                x0_pred = self.base_diffusion.decode_first_stage(
-                        z0_pred,
-                        self.autoencoder,
-                        )
+                
+                # 分批处理 x0_pred
+                x0_pred_list = []
+                for i in range(0, z0_pred.shape[0], inference_batch_size):
+                    z0_pred_batch = z0_pred[i:i+inference_batch_size]
+                    x0_pred_batch = self.base_diffusion.decode_first_stage(
+                            z0_pred_batch,
+                            self.autoencoder,
+                            )
+                    x0_pred_list.append(x0_pred_batch)
+                x0_pred = torch.cat(x0_pred_list, dim=0)
                 self.logging_image(x0_pred, tag='x0-pred', phase=phase, add_global_step=True)
 
-            if self.current_iters % self.configs.train.save_freq == 1:
+            if current_iters % self.configs.train.save_freq == 1:
                 self.tic = time.time()
-            if self.current_iters % self.configs.train.save_freq == 0:
+            if current_iters % self.configs.train.save_freq == 0:
                 self.toc = time.time()
                 elaplsed = (self.toc - self.tic)
                 self.logger.info(f"Elapsed time: {elaplsed:.2f}s")
                 self.logger.info("="*100)
 
+    @torch.inference_mode()
     def validation(self, phase='val'):
         if self.rank == 0:
             if self.configs.train.use_ema_val:
@@ -506,6 +545,8 @@ class TrainerDifIR(TrainerBase):
                 self.ema_model.eval()
             else:
                 self.model.eval()
+
+            print(f"validation. current iters: {self.current_iters}")
 
             indices = np.linspace(
                     0,
@@ -520,6 +561,7 @@ class TrainerDifIR(TrainerBase):
             num_iters_epoch = math.ceil(len(self.datasets[phase]) / batch_size)
             mean_psnr = mean_lpips = 0
             for ii, data in enumerate(self.dataloaders[phase]):
+                torch.compiler.cudagraph_mark_step_begin()
                 data = self.prepare_data(data, phase='val')
                 if 'gt' in data:
                     im_lq, im_gt = data['lq'], data['gt']
@@ -536,6 +578,7 @@ class TrainerDifIR(TrainerBase):
                         [self.base_diffusion.num_timesteps, ]*im_lq.shape[0],
                         dtype=torch.int64,
                         ).cuda()
+                im_sr_progress_list = []
                 for sample in self.base_diffusion.p_sample_loop_progressive(
                         y=im_lq,
                         model=self.ema_model.module if self.configs.train.use_ema_val else self.model,
@@ -545,6 +588,7 @@ class TrainerDifIR(TrainerBase):
                         model_kwargs=model_kwargs,
                         device=f"cuda:{self.rank}",
                         progress=False,
+
                         ):
                     sample_decode = {}
                     if num_iters in indices:
@@ -555,21 +599,21 @@ class TrainerDifIR(TrainerBase):
                                         self.autoencoder,
                                         ).clamp(-1.0, 1.0)
                         im_sr_progress = sample_decode['sample']
-                        if num_iters + 1 == 1:
-                            im_sr_all = im_sr_progress
-                        else:
-                            im_sr_all = torch.cat((im_sr_all, im_sr_progress), dim=1)
+                        im_sr_progress_list.append(im_sr_progress.clone())
                     num_iters += 1
                     tt -= 1
+                
+                im_sr_all = torch.cat(im_sr_progress_list, dim=1) # b, k*c, h, w
+                val_sample = sample_decode['sample'].clone()
 
                 if 'gt' in data:
                     mean_psnr += util_image.batch_PSNR(
-                            sample_decode['sample'] * 0.5 + 0.5,
+                            val_sample * 0.5 + 0.5,
                             im_gt * 0.5 + 0.5,
                             ycbcr=self.configs.train.val_y_channel,
                             )
                     mean_lpips += self.lpips_loss(
-                            sample_decode['sample'],
+                            val_sample,
                             im_gt,
                             ).sum().item()
 
@@ -588,6 +632,9 @@ class TrainerDifIR(TrainerBase):
                         self.logging_image(im_gt, tag='gt', phase=phase, add_global_step=False)
                     self.logging_image(im_lq, tag='lq', phase=phase, add_global_step=True)
 
+
+
+
             if 'gt' in data:
                 mean_psnr /= len(self.datasets[phase])
                 mean_lpips /= len(self.datasets[phase])
@@ -599,6 +646,9 @@ class TrainerDifIR(TrainerBase):
 
             if not (self.configs.train.use_ema_val and hasattr(self.configs.train, 'ema_rate')):
                 self.model.train()
+
+        
+        # print(torch.cuda.memory_summary(device=None, abbreviated=True))
 
 
 class TrainerDifIRLPIPS(TrainerDifIR):

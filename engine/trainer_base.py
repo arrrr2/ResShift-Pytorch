@@ -284,6 +284,7 @@ class TrainerBase:
             pin_memory=True,
             worker_init_fn=my_worker_init_fn,
             sampler=sampler,
+            persistent_workers=False if num_workers == 0 else True,
         )
         if num_workers > 0:
             loader_kwargs["prefetch_factor"] = self.configs.train.get('prefetch_factor', 2)
@@ -333,15 +334,33 @@ class TrainerBase:
 
         self.model.train()
         num_iters_epoch = math.ceil(len(self.datasets['train']) / self.configs.train.batch[0])
+
+        # Prefetch the first batch of data
+        raw_data = next(self.dataloaders['train'])
+        with torch.cuda.stream(self.data_stream):
+            prepared_data = self.prepare_data(raw_data)
+
+
+        # torch.cuda.memory._record_memory_history()
+
         for ii in range(self.iters_start, self.configs.train.iterations):
             self.current_iters = ii + 1
 
-            # prepare data
-            data = self.prepare_data(next(self.dataloaders['train']))
+
+            # Wait for the data from the previous iteration to be ready
+            torch.cuda.current_stream().wait_stream(self.data_stream)
+            current_prepared_data = prepared_data
+
+            # Asynchronously prepare data for the next iteration
+            if (ii+1) < self.configs.train.iterations:
+                raw_data = next(self.dataloaders['train'])
+                with torch.cuda.stream(self.data_stream):
+                    prepared_data = self.prepare_data(raw_data)
 
             # training phase
-            self.training_step(data)
-
+            self.training_step(current_prepared_data)
+            # torch.cuda.memory._dump_snapshot("my_snapshot.pickle")
+            # if ii >= 2: break
             # validation phase
             if 'val' in self.dataloaders and (ii+1) % self.configs.train.get('val_freq', 10000) == 0:
                 self.validation()

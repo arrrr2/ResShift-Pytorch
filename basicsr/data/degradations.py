@@ -607,7 +607,7 @@ def add_poisson_noise(img, scale=1.0, clip=True, rounds=False, gray_noise=False)
     return out
 
 
-def generate_poisson_noise_pt(img, scale=1.0, gray_noise=0):
+def generate_poisson_noise_pt_numpy(img, scale=1.0, gray_noise=0):
     """Generate a batch of poisson noise (PyTorch version)
 
     Args:
@@ -653,6 +653,81 @@ def generate_poisson_noise_pt(img, scale=1.0, gray_noise=0):
     if not isinstance(scale, (float, int)):
         scale = scale.view(b, 1, 1, 1)
     return noise * scale
+
+def generate_poisson_noise_pt(img, scale=1.0, gray_noise=0):
+    """Generate a batch of poisson noise (PyTorch version, GPU-friendly & numpy-free)
+
+    Args:
+        img (Tensor): (b, c, h, w), [0,1], float32
+        scale (float|Tensor): 标量或形如 (b,)
+        gray_noise (float|Tensor): 0/1 或 (b,)，控制灰度噪声混合比例
+    Returns:
+        Tensor: (b, c, h, w), [0,1], float32 的噪声（与原实现一致：返回的是 noise，而不是加噪后的图像）
+    """
+    import torch
+
+    b, c, h, w = img.size()
+
+    # 处理 gray_noise 的开关逻辑（与原实现保持一致）
+    if isinstance(gray_noise, (float, int)):
+        cal_gray_noise = gray_noise > 0
+    else:
+        gray_noise = gray_noise.view(b, 1, 1, 1).to(dtype=img.dtype, device=img.device)
+        cal_gray_noise = torch.sum(gray_noise) > 0
+
+    # ---------- 灰度 Poisson 噪声 ----------
+    if cal_gray_noise:
+        img_gray = rgb_to_grayscale(img, num_output_channels=1)  # (b,1,h,w)，保持与你现有实现一致
+        # 量化到 0..255（与原来 clamp(round)/255 的数学行为一致）
+        qg = torch.clamp((img_gray * 255.0).round(), 0, 255).to(torch.int64)  # (b,1,h,w) int
+        img_gray_q = qg.to(torch.float32) / 255.0                              # 回到 [0,1] float
+
+        # 计算每个样本的唯一值个数：用 bincount + 样本偏移 一次性矢量化完成
+        # 将 (b,1,h,w) -> (b, -1)
+        qg_flat = qg.view(b, -1)  # int64, 值域 0..255
+        n_bins = 256
+        # 为不同样本加偏移，使得可一次 bincount： val + sample_idx*256
+        offsets = (torch.arange(b, device=img.device, dtype=torch.int64) * n_bins).view(b, 1)
+        encoded = (qg_flat + offsets).reshape(-1)  # (b*h*w,)
+        hist = torch.bincount(encoded, minlength=b * n_bins).view(b, n_bins)  # (b,256)
+        uniq_counts_gray = (hist > 0).sum(dim=1).to(torch.float32)  # (b,)
+
+        # vals = 2 ** ceil(log2(uniq_counts))
+        vals_gray = torch.pow(2.0, torch.ceil(torch.log2(uniq_counts_gray))).view(b, 1, 1, 1)
+        # Poisson 采样（保持与原实现一致）
+        out_gray = torch.poisson(img_gray_q * vals_gray) / vals_gray
+        noise_gray = out_gray - img_gray_q
+        # 扩展到 3 通道与原逻辑一致（不复制数据）
+        noise_gray = noise_gray.expand(b, 3, h, w)
+
+    # ---------- 彩色 Poisson 噪声（总是计算） ----------
+    # 量化到 0..255 后统计唯一值（跨所有通道、像素）
+    qi = torch.clamp((img * 255.0).round(), 0, 255).to(torch.int64)  # (b,c,h,w) int
+    img_q = qi.to(torch.float32) / 255.0                              # (b,c,h,w) float
+
+    # (b,c,h,w) -> (b, -1)
+    qi_flat = qi.reshape(b, -1)  # int64, 值域 0..255
+    n_bins = 256
+    offsets = (torch.arange(b, device=img.device, dtype=torch.int64) * n_bins).view(b, 1)
+    encoded = (qi_flat + offsets).reshape(-1)
+    hist = torch.bincount(encoded, minlength=b * n_bins).view(b, n_bins)  # (b,256)
+    uniq_counts = (hist > 0).sum(dim=1).to(torch.float32)  # (b,)
+
+    vals = torch.pow(2.0, torch.ceil(torch.log2(uniq_counts))).view(b, 1, 1, 1)
+    out = torch.poisson(img_q * vals) / vals
+    noise = out - img_q
+
+    # 按需与灰度噪声混合（与原实现等价）
+    if cal_gray_noise:
+        # gray_noise 可能是标量或 (b,1,1,1)；两者都能广播
+        noise = noise * (1 - gray_noise) + noise_gray * gray_noise
+
+    # 处理 scale
+    if not isinstance(scale, (float, int)):
+        scale = scale.view(b, 1, 1, 1).to(dtype=img.dtype, device=img.device)
+
+    return noise * scale
+
 
 
 def add_poisson_noise_pt(img, scale=1.0, clip=True, rounds=False, gray_noise=0):
