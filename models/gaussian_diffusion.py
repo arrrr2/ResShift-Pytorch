@@ -10,6 +10,11 @@ from .basic_ops import mean_flat
 from .losses import normal_kl, discretized_gaussian_log_likelihood
 
 
+import enum
+import torch as th
+import torch.nn.functional as F
+
+
 def get_named_beta_schedule(schedule_name, num_diffusion_timesteps, beta_start, beta_end):
     """
     Get a pre-defined beta schedule for the given name.
@@ -22,8 +27,8 @@ def get_named_beta_schedule(schedule_name, num_diffusion_timesteps, beta_start, 
     if schedule_name == "linear":
         # Linear schedule from Ho et al, extended to work for any number of
         # diffusion steps.
-        return np.linspace(
-            beta_start**0.5, beta_end**0.5, num_diffusion_timesteps, dtype=np.float64
+        return th.linspace(
+            beta_start**0.5, beta_end**0.5, num_diffusion_timesteps, dtype=th.float64
         )**2
     else:
         raise NotImplementedError(f"unknown beta schedule: {schedule_name}")
@@ -43,22 +48,23 @@ def get_named_eta_schedule(
     """
     if schedule_name == 'exponential':
         # ponential = kwargs.get('ponential', None)
-        # start = math.exp(math.log(min_noise_level / kappa) / ponential)
-        # end = math.exp(math.log(etas_end) / (2*ponential))
-        # xx = np.linspace(start, end, num_diffusion_timesteps, endpoint=True, dtype=np.float64)
+        # start = th.exp(th.log(th.tensor(min_noise_level / kappa)) / ponential)
+        # end = th.exp(th.log(th.tensor(etas_end)) / (2*ponential))
+        # xx = th.linspace(start, end, num_diffusion_timesteps, endpoint=True, dtype=th.float64)
         # sqrt_etas = xx**ponential
         power = kwargs.get('power', None)
-        # etas_start = min(min_noise_level / kappa, min_noise_level, math.sqrt(0.001))
+        # etas_start = min(min_noise_level / kappa, min_noise_level, th.sqrt(th.tensor(0.001)))
         etas_start = min(min_noise_level / kappa, min_noise_level)
-        increaser = math.exp(1/(num_diffusion_timesteps-1)*math.log(etas_end/etas_start))
-        base = np.ones([num_diffusion_timesteps, ]) * increaser
-        power_timestep = np.linspace(0, 1, num_diffusion_timesteps, endpoint=True)**power
+        increaser = th.exp(1/(num_diffusion_timesteps-1)*th.log(th.tensor(etas_end/etas_start)))
+        base = th.ones([num_diffusion_timesteps, ]) * increaser
+        power_timestep = th.linspace(0., 1., num_diffusion_timesteps)**power
         power_timestep *= (num_diffusion_timesteps-1)
-        sqrt_etas = np.power(base, power_timestep) * etas_start
+        sqrt_etas = th.pow(base, power_timestep) * etas_start
     elif schedule_name == 'ldm':
         import scipy.io as sio
         mat_path = kwargs.get('mat_path', None)
-        sqrt_etas = sio.loadmat(mat_path)['sqrt_etas'].reshape(-1)
+        sqrt_etas_np = sio.loadmat(mat_path)['sqrt_etas'].reshape(-1)
+        sqrt_etas = th.from_numpy(sqrt_etas_np).float()
     else:
         raise ValueError(f"Unknow schedule_name {schedule_name}")
 
@@ -90,15 +96,15 @@ class ModelVarTypeDDPM(enum.Enum):
 
 def _extract_into_tensor(arr, timesteps, broadcast_shape):
     """
-    Extract values from a 1-D numpy array for a batch of indices.
+    Extract values from a 1-D torch tensor for a batch of indices.
 
-    :param arr: the 1-D numpy array.
+    :param arr: the 1-D torch tensor.
     :param timesteps: a tensor of indices into the array to extract.
     :param broadcast_shape: a larger shape of K dimensions with the batch
                             dimension equal to the length of timesteps.
     :return: a tensor of shape [batch_size, 1, ...] where the shape has K dims.
     """
-    res = th.from_numpy(arr).to(device=timesteps.device)[timesteps].float()
+    res = arr.to(device=timesteps.device)[timesteps].float()
     while len(res.shape) < len(broadcast_shape):
         res = res[..., None]
     return res.expand(broadcast_shape)
@@ -107,7 +113,7 @@ class GaussianDiffusion:
     """
     Utilities for training and sampling diffusion models.
 
-    :param sqrt_etas: a 1-D numpy array of etas for each diffusion timestep,
+    :param sqrt_etas: a 1-D torch tensor of etas for each diffusion timestep,
                 starting at T and going to 1.
     :param kappa: a scaler controling the variance of the diffusion kernel
     :param model_mean_type: a ModelMeanType determining what the model outputs.
@@ -138,6 +144,8 @@ class GaussianDiffusion:
         self.latent_flag = latent_flag
         self.sf = sf
 
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
         # Use float64 for accuracy.
         self.sqrt_etas = sqrt_etas
         self.etas = sqrt_etas**2
@@ -145,20 +153,21 @@ class GaussianDiffusion:
         assert (self.etas > 0).all() and (self.etas <= 1).all()
 
         self.num_timesteps = int(self.etas.shape[0])
-        self.etas_prev = np.append(0.0, self.etas[:-1])
+        self.etas_prev = th.cat([th.tensor([0.0], dtype=sqrt_etas.dtype, device=sqrt_etas.device), self.etas[:-1]])
         self.alpha = self.etas - self.etas_prev
 
         # calculations for posterior q(x_{t-1} | x_t, x_0)
         self.posterior_variance = kappa**2 * self.etas_prev / self.etas * self.alpha
-        self.posterior_variance_clipped = np.append(
-                self.posterior_variance[1], self.posterior_variance[1:]
+        self.posterior_variance = self.posterior_variance
+        self.posterior_variance_clipped = th.cat(
+                [self.posterior_variance[1:2], self.posterior_variance[1:]]
                 )
         # log calculation clipped because the posterior variance is 0 at the
         # beginning of the diffusion chain.
-        self.posterior_log_variance_clipped = np.log(self.posterior_variance_clipped)
+        self.posterior_log_variance_clipped = th.log(self.posterior_variance_clipped)
         self.posterior_mean_coef1 = self.etas_prev / self.etas
         self.posterior_mean_coef2 = self.alpha / self.etas
-
+        
         # weight for the mse loss
         if model_mean_type in [ModelMeanType.START_X, ModelMeanType.RESIDUAL]:
             weight_loss_mse = 0.5 / self.posterior_variance_clipped * (self.alpha / self.etas)**2
@@ -171,6 +180,15 @@ class GaussianDiffusion:
 
         # self.weight_loss_mse = np.append(weight_loss_mse[1],  weight_loss_mse[1:])
         self.weight_loss_mse = weight_loss_mse
+
+        self.sqrt_etas = self.sqrt_etas.to(self.device)
+        self.etas = self.etas.to(self.device)
+        self.posterior_variance = self.posterior_variance.to(self.device)
+        self.posterior_log_variance_clipped = self.posterior_log_variance_clipped.to(self.device)
+        self.posterior_mean_coef1 = self.posterior_mean_coef1.to(self.device)
+        self.posterior_mean_coef2 = self.posterior_mean_coef2.to(self.device)
+        self.weight_loss_mse = self.weight_loss_mse.to(self.device)
+
 
     def q_mean_variance(self, x_start, y, t):
         """
@@ -570,7 +588,7 @@ class GaussianDiffusion:
                 ModelMeanType.EPSILON_SCALE: noise*self.kappa*_extract_into_tensor(self.sqrt_etas, t, noise.shape),
             }[self.model_mean_type]
             assert model_output.shape == target.shape == z_start.shape
-            terms["mse"] = mean_flat((target - model_output) ** 2)
+            terms["mse"] = F.mse_loss(model_output, target, reduction='none').mean(dim=list(range(1, len(model_output.shape))))
             if self.model_mean_type == ModelMeanType.EPSILON_SCALE:
                 terms["mse"] /= (self.kappa**2 * _extract_into_tensor(self.etas, t, t.shape))
             if self.loss_type == LossType.WEIGHTED_MSE:

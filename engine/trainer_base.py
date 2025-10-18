@@ -88,6 +88,9 @@ class TrainerBase:
         # CUDNN settings for reproducibility
         torch.backends.cudnn.benchmark = not self.configs.train.get('deterministic', False)
         torch.backends.cudnn.deterministic = self.configs.train.get('deterministic', False)
+        torch.set_float32_matmul_precision("high")
+
+        
 
     def init_logger(self):
         if self.configs.resume:
@@ -154,17 +157,6 @@ class TrainerBase:
             self.writer.close()
 
     def resume_from_ckpt(self):
-        def _load_ema_state(ema_state, ckpt):
-            for key in ema_state.keys():
-                if key in ckpt:
-                    ema_state[key] = ckpt[key].detach().clone()
-                elif key.startswith('module.') and key[7:] in ckpt:
-                    ema_state[key] = ckpt[key[7:]].detach().clone()
-                elif (not key.startswith('module.')) and ('module.' + key) in ckpt:
-                    ema_state[key] = ckpt['module.' + key].detach().clone()
-                else:
-                    # Handle missing keys gracefully
-                    pass
 
         if self.configs.resume:
             assert self.configs.resume.endswith(".pth") and os.path.isfile(self.configs.resume)
@@ -284,7 +276,6 @@ class TrainerBase:
             pin_memory=True,
             worker_init_fn=my_worker_init_fn,
             sampler=sampler,
-            persistent_workers=False if num_workers == 0 else True,
         )
         if num_workers > 0:
             loader_kwargs["prefetch_factor"] = self.configs.train.get('prefetch_factor', 2)

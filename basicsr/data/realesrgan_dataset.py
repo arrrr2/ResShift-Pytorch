@@ -111,7 +111,7 @@ class RealESRGANDataset(data.Dataset):
         while retry > 0:
             try:
                 img_bytes = self.file_client.get(gt_path, 'gt')
-                img_gt = imfrombytes(img_bytes, float32=True)
+                img_gt = imfrombytes(img_bytes, float32=False)
             # except (IOError, OSError, AttributeError) as e:
             except:
                 # logger = get_root_logger()
@@ -227,7 +227,7 @@ class RealESRGANDataset(data.Dataset):
             sinc_kernel = self.pulse_tensor
 
         # BGR to RGB, HWC to CHW, numpy to tensor
-        img_gt = img2tensor([img_gt], bgr2rgb=True, float32=True)[0]
+        img_gt = img2tensor([img_gt], bgr2rgb=True, float32=False)[0]
         kernel = torch.FloatTensor(kernel)
         kernel2 = torch.FloatTensor(kernel2)
 

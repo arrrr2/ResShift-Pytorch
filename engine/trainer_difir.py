@@ -35,6 +35,7 @@ class TrainerDifIR(TrainerBase):
         self.loss_count = None
         
         def lr_lambda(step):
+            step = step + 1
             warmup = self.configs.train.warmup_iterations
             if step < warmup:
                 return step / warmup
@@ -129,41 +130,36 @@ class TrainerDifIR(TrainerBase):
 
         if not hasattr(self, 'queue_lr'):
             assert self.queue_size % b == 0
-            # 数据池可以是普通 CPU Tensor（更快的 CPU 操作）；需要上 GPU 时再 non_blocking 拷
-            self.queue_lr = torch.empty(self.queue_size, c, h, w, dtype=self.lq.dtype)  # 去掉 pin_memory
-            _, c2, h2, w2 = self.gt.size()
-            self.queue_gt = torch.empty(self.queue_size, c2, h2, w2, dtype=self.gt.dtype)
-            # 小小的索引/指针：一个环形写指针，或一个索引序列
-            self.write_ptr = 0
-            # 可选：如果你仍想“随机出队”，就维护一个 perm 索引，不要洗牌数据：
-            self.perm = torch.arange(self.queue_size)  # CPU 小张量
 
-        # 队列未满：仅入队
+            self.queue_lr = torch.empty(self.queue_size, c, h, w, dtype=self.lq.dtype, device=f"cuda:{self.rank}")  
+            _, c2, h2, w2 = self.gt.size()
+            self.queue_gt = torch.empty(self.queue_size, c2, h2, w2, dtype=self.gt.dtype, device=f"cuda:{self.rank}")
+            self.write_ptr = 0
+            self.perm = torch.arange(self.queue_size, device=f"cuda:{self.rank}")
+
+
         end = self.write_ptr + b
         if end <= self.queue_size:
-            self.queue_lr[self.write_ptr:end].copy_(self.lq.to('cpu', non_blocking=True))
-            self.queue_gt[self.write_ptr:end].copy_(self.gt.to('cpu', non_blocking=True))
+            self.queue_lr[self.write_ptr:end].copy_(self.lq.to(f"cuda:{self.rank}", non_blocking=True))
+            self.queue_gt[self.write_ptr:end].copy_(self.gt.to(f"cuda:{self.rank}", non_blocking=True))
         else:
             first = self.queue_size - self.write_ptr
-            self.queue_lr[self.write_ptr:].copy_(self.lq[:first].to('cpu', non_blocking=True))
-            self.queue_gt[self.write_ptr:].copy_(self.gt[:first].to('cpu', non_blocking=True))
-            self.queue_lr[:b-first].copy_(self.lq[first:].to('cpu', non_blocking=True))
-            self.queue_gt[:b-first].copy_(self.gt[first:].to('cpu', non_blocking=True))
+            self.queue_lr[self.write_ptr:].copy_(self.lq[:first].to(f"cuda:{self.rank}", non_blocking=True))
+            self.queue_gt[self.write_ptr:].copy_(self.gt[:first].to(f"cuda:{self.rank}", non_blocking=True))
+            self.queue_lr[:b-first].copy_(self.lq[first:].to(f"cuda:{self.rank}", non_blocking=True))
+            self.queue_gt[:b-first].copy_(self.gt[first:].to(f"cuda:{self.rank}", non_blocking=True))
         self.write_ptr = (self.write_ptr + b) % self.queue_size
 
-        # 队列满了以后：只“抽样”不用洗牌数据
-        # 1) 如果你想完全随机，就随机挑 b 个索引（无需全量 randperm）
-        # sel = torch.randperm(self.queue_size)[:b]
-        # 2) 如果你只想“像之前一样换一批”，就从 perm 里取前 b 个并 rotate
-        sel = self.perm[:b].clone()
+
+        sel = self.perm[:b]
         self.perm = torch.roll(self.perm, -b)
 
-        # 出队：只根据索引拉取，不创建大块新张量（可以复用 buffer）
-        lq_dequeue = self.queue_lr.index_select(0, sel).to(f"cuda:{self.rank}", non_blocking=True)
-        gt_dequeue = self.queue_gt.index_select(0, sel).to(f"cuda:{self.rank}", non_blocking=True)
 
-        self.lq = lq_dequeue.detach().clone()
-        self.gt = gt_dequeue.detach().clone()
+        lq_dequeue = self.queue_lr.index_select(0, sel)
+        gt_dequeue = self.queue_gt.index_select(0, sel)
+
+        self.lq = lq_dequeue.detach()
+        self.gt = gt_dequeue.detach()
 
 
     @torch.no_grad()
@@ -176,7 +172,7 @@ class TrainerDifIR(TrainerBase):
             if not hasattr(self, 'use_sharpener'):
                 self.use_sharpener = USMSharp().cuda()
 
-            im_gt = data['gt'].cuda()
+            im_gt = data['gt'].cuda().to(dtype=dtype) / 255.
             kernel1 = data['kernel1'].cuda()
             kernel2 = data['kernel2'].cuda()
             sinc_kernel = data['sinc_kernel'].cuda()
@@ -332,6 +328,7 @@ class TrainerDifIR(TrainerBase):
         elif phase == 'val':
             offset = self.configs.train.get('val_resolution', 256)
             for key, value in data.items():
+                value = value.to(dtype=dtype) / 255.
                 h, w = value.shape[2:]
                 if h > offset and w > offset:
                     h_end = int((h // offset) * offset)
@@ -378,14 +375,14 @@ class TrainerDifIR(TrainerBase):
             
             torch.compiler.cudagraph_mark_step_begin()
 
-            micro_data = {key:value[jj:jj+micro_batchsize,].clone() for key, value in data.items()}
+            micro_data = {key:value[jj:jj+micro_batchsize,] for key, value in data.items()}
             last_batch = (jj+micro_batchsize >= current_batchsize)
             tt = torch.randint(
                     0, self.base_diffusion.num_timesteps,
                     size=(micro_data['gt'].shape[0],),
                     device=f"cuda:{self.rank}",
                     )
-            # 修正：只有存在 autoencoder 才走 latent 逻辑，否则用原图分辨率
+
             if self.autoencoder is not None:
                 latent_downsamping_sf = 2 ** (len(self.configs.autoencoder.params.ddconfig.ch_mult) - 1)
                 latent_resolution = micro_data['gt'].shape[-1] // latent_downsamping_sf
@@ -406,9 +403,9 @@ class TrainerDifIR(TrainerBase):
 
             
             if self.configs.model.params.cond_lq:
-                micro_data['lq'] = micro_data['lq'].detach().clone()
+                micro_data['lq'] = micro_data['lq'].detach()
                 if 'mask' in micro_data:
-                    micro_data['mask'] = micro_data['mask'].detach().clone()
+                    micro_data['mask'] = micro_data['mask'].detach()
 
             compute_losses = functools.partial(
                 self.base_diffusion.training_losses,
@@ -501,10 +498,9 @@ class TrainerDifIR(TrainerBase):
                 self.logging_image(batch['lq'], tag='lq', phase=phase, add_global_step=False)
                 self.logging_image(batch['gt'], tag='gt', phase=phase, add_global_step=False)
                 
-                # 获取推理batch大小，从配置中获取，与validation中相同
                 inference_batch_size = self.configs.train.batch[1]
                 
-                # 分批处理 x_t
+
                 z_t_scaled = self.base_diffusion._scale_input(z_t, tt)
                 x_t_list = []
                 for i in range(0, z_t_scaled.shape[0], inference_batch_size):
@@ -517,7 +513,7 @@ class TrainerDifIR(TrainerBase):
                 x_t = torch.cat(x_t_list, dim=0)
                 self.logging_image(x_t, tag='diffused', phase=phase, add_global_step=False)
                 
-                # 分批处理 x0_pred
+
                 x0_pred_list = []
                 for i in range(0, z0_pred.shape[0], inference_batch_size):
                     z0_pred_batch = z0_pred[i:i+inference_batch_size]
@@ -599,12 +595,12 @@ class TrainerDifIR(TrainerBase):
                                         self.autoencoder,
                                         ).clamp(-1.0, 1.0)
                         im_sr_progress = sample_decode['sample']
-                        im_sr_progress_list.append(im_sr_progress.clone())
+                        im_sr_progress_list.append(im_sr_progress)
                     num_iters += 1
                     tt -= 1
                 
                 im_sr_all = torch.cat(im_sr_progress_list, dim=1) # b, k*c, h, w
-                val_sample = sample_decode['sample'].clone()
+                val_sample = sample_decode['sample']
 
                 if 'gt' in data:
                     mean_psnr += util_image.batch_PSNR(
@@ -647,8 +643,7 @@ class TrainerDifIR(TrainerBase):
             if not (self.configs.train.use_ema_val and hasattr(self.configs.train, 'ema_rate')):
                 self.model.train()
 
-        
-        # print(torch.cuda.memory_summary(device=None, abbreviated=True))
+    
 
 
 class TrainerDifIRLPIPS(TrainerDifIR):

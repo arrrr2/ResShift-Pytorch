@@ -34,12 +34,9 @@ class SpacedDiffusion(GaussianDiffusion):
         self.original_num_steps = len(kwargs["sqrt_etas"])
 
         base_diffusion = GaussianDiffusion(**kwargs)  # pylint: disable=missing-kwoa
-        new_sqrt_etas = []
-        for ii, etas_current in enumerate(base_diffusion.sqrt_etas):
-            if ii in self.use_timesteps:
-                new_sqrt_etas.append(etas_current)
-                self.timestep_map.append(ii)
-        kwargs["sqrt_etas"] = np.array(new_sqrt_etas)
+        self.timestep_map = sorted(list(self.use_timesteps))
+        new_sqrt_etas = base_diffusion.sqrt_etas[self.timestep_map]
+        kwargs["sqrt_etas"] = new_sqrt_etas
         super().__init__(**kwargs)
         self._wrap_cache = weakref.WeakKeyDictionary()
 
