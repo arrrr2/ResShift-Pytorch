@@ -202,6 +202,60 @@ class AttnBlock(nn.Module):
 
         return x+h_
 
+class SDPAAttnBlock(nn.Module):
+    """
+    Attention block using PyTorch's Scaled Dot-Product Attention (SDPA)
+    """
+    def __init__(self, in_channels):
+        super().__init__()
+        self.in_channels = in_channels
+
+        self.norm = Normalize(in_channels)
+        self.q = torch.nn.Conv2d(in_channels,
+                                 in_channels,
+                                 kernel_size=1,
+                                 stride=1,
+                                 padding=0)
+        self.k = torch.nn.Conv2d(in_channels,
+                                 in_channels,
+                                 kernel_size=1,
+                                 stride=1,
+                                 padding=0)
+        self.v = torch.nn.Conv2d(in_channels,
+                                 in_channels,
+                                 kernel_size=1,
+                                 stride=1,
+                                 padding=0)
+        self.proj_out = torch.nn.Conv2d(in_channels,
+                                        in_channels,
+                                        kernel_size=1,
+                                        stride=1,
+                                        padding=0)
+
+    def forward(self, x):
+        h_ = x
+        h_ = self.norm(h_)
+        q = self.q(h_)
+        k = self.k(h_)
+        v = self.v(h_)
+
+        # reshape for SDPA: (b, c, h, w) -> (b, h*w, c)
+        b, c, h, w = q.shape
+        q = q.reshape(b, c, h*w).permute(0, 2, 1)  # (b, h*w, c)
+        k = k.reshape(b, c, h*w).permute(0, 2, 1)  # (b, h*w, c)
+        v = v.reshape(b, c, h*w).permute(0, 2, 1)  # (b, h*w, c)
+
+        # use scaled dot-product attention
+        h_ = torch.nn.functional.scaled_dot_product_attention(
+            q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False
+        )
+
+        # reshape back: (b, h*w, c) -> (b, c, h, w)
+        h_ = h_.permute(0, 2, 1).reshape(b, c, h, w)
+        h_ = self.proj_out(h_)
+
+        return x + h_
+
 class MemoryEfficientAttnBlock(nn.Module):
     """
         Uses xformers efficient implementation,
@@ -236,6 +290,7 @@ class MemoryEfficientAttnBlock(nn.Module):
                                         padding=0)
         self.attention_op: Optional[Any] = None
 
+    
     def forward(self, x):
         h_ = x
         h_ = self.norm(h_)
@@ -255,7 +310,8 @@ class MemoryEfficientAttnBlock(nn.Module):
             .contiguous(),
             (q, k, v),
         )
-        out = xformers.ops.memory_efficient_attention(q, k, v, attn_bias=None, op=self.attention_op)
+
+        out = self.attn(q, k, v, attn_bias=None, op=self.attention_op)
 
         out = (
             out.unsqueeze(0)
@@ -266,6 +322,10 @@ class MemoryEfficientAttnBlock(nn.Module):
         out = rearrange(out, 'b (h w) c -> b c h w', b=B, h=H, w=W, c=C)
         out = self.proj_out(out)
         return x+out
+    
+    @torch._dynamo.disable()
+    def attn(self, *args, **kwargs):
+        return xformers.ops.memory_efficient_attention(*args, **kwargs)
 
 
 class MemoryEfficientCrossAttentionWrapper(MemoryEfficientCrossAttention):
@@ -279,6 +339,14 @@ class MemoryEfficientCrossAttentionWrapper(MemoryEfficientCrossAttention):
 
 def make_attn(in_channels, attn_type="vanilla", attn_kwargs=None):
     assert attn_type in ["vanilla", "vanilla-xformers", "memory-efficient-cross-attn", "linear", "none"], f'attn_type {attn_type} unknown'
+    
+    # # Check if SDPA is available and use it if it is
+    # if hasattr(torch.nn.functional, 'scaled_dot_product_attention'):
+    #     # SDPA is available, ignore attn_type and use SDPAAttnBlock
+    #     print(f"building SDPAAttnBlock with {in_channels} in_channels...")
+    #     return SDPAAttnBlock(in_channels)
+    
+    # Fallback to original implementations if SDPA is not available
     if XFORMERS_IS_AVAILBLE and attn_type == "vanilla":
         attn_type = "vanilla-xformers"
     # print(f"making attention of type '{attn_type}' with {in_channels} in_channels")

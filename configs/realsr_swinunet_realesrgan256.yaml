@@ -1,6 +1,31 @@
 trainer:
   target: trainer.TrainerDifIR
 
+autoencoder:
+  target: ldm.models.autoencoder.VQModelTorch
+  ckpt_path: weights/autoencoder_vq_f4.pth
+  use_fp16: True
+  tune_decoder: False
+  params:
+    lora_tune_decoder: False
+    embed_dim: 3
+    n_embed: 8192
+    ddconfig:
+      double_z: False
+      z_channels: 3
+      resolution: 256
+      in_channels: 3
+      out_ch: 3
+      ch: 128
+      ch_mult:
+      - 1
+      - 2
+      - 4
+      num_res_blocks: 2
+      attn_resolutions: []
+      dropout: 0.0
+      padding_mode: zeros
+
 model:
   target: models.unet.UNetModelSwin
   ckpt_path: ~
@@ -43,31 +68,6 @@ diffusion:
     scale_factor: 1.0
     normalize_input: True
     latent_flag: True
-
-autoencoder:
-  target: ldm.models.autoencoder.VQModelTorch
-  ckpt_path: weights/autoencoder_vq_f4.pth
-  use_fp16: True
-  tune_decoder: False
-  params:
-    lora_tune_decoder: False
-    embed_dim: 3
-    n_embed: 8192
-    ddconfig:
-      double_z: False
-      z_channels: 3
-      resolution: 256
-      in_channels: 3
-      out_ch: 3
-      ch: 128
-      ch_mult:
-      - 1
-      - 2
-      - 4
-      num_res_blocks: 2
-      attn_resolutions: []
-      dropout: 0.0
-      padding_mode: zeros
 
 degradation:
   sf: 4
@@ -130,6 +130,7 @@ data:
       use_hflip: True
       use_rot: False
       rescale_gt: True
+      cudnn_benchmark: True
   val:
     type: base
     params:

@@ -333,12 +333,15 @@ class TrainerDifIR(TrainerBase):
                 if h > offset and w > offset:
                     h_end = int((h // offset) * offset)
                     w_end = int((w // offset) * offset)
-                    data[key] = value[:, :, :h_end, :w_end]
+                    value = value[:, :, :h_end, :w_end]
                 else:
                     h_pad = math.ceil(h / offset) * offset - h
                     w_pad = math.ceil(w / offset) * offset - w
                     padding_mode = self.configs.train.get('val_padding_mode', 'reflect')
-                    data[key] = F.pad(value, pad=(0, w_pad, 0, h_pad), mode=padding_mode)
+                    value = F.pad(value, pad=(0, w_pad, 0, h_pad), mode=padding_mode)
+                # Convert from [0, 1] to [-1, 1]
+                value = (value - 0.5) / 0.5
+                data[key] = value
             return {key:value.cuda().to(dtype=dtype, memory_format=torch.channels_last) for key, value in data.items()}
         else:
             return {key:value.cuda().to(dtype=dtype, memory_format=torch.channels_last) for key, value in data.items()}
@@ -676,7 +679,7 @@ class TrainerDifIRLPIPS(TrainerDifIR):
                     assert loss_coef[2] > 0
 
                     # calculate mse in pixel space
-                    x0_pred_pixel = x0_pred.detach()
+                    x0_pred_pixel = x0_pred
                     gt_pixel = micro_data['gt']
                     losses["mse"] = F.mse_loss(x0_pred_pixel, gt_pixel, reduction='none').mean(dim=[1,2,3]).view(-1)
                     losses["mse"] *= loss_coef[2]
@@ -704,11 +707,12 @@ class TrainerDifIRLPIPS(TrainerDifIR):
                 assert loss_coef[2] > 0
 
                 # calculate mse in pixel space
-                x0_pred_pixel = x0_pred.detach()
+                x0_pred_pixel = x0_pred
                 gt_pixel = micro_data['gt']
                 losses["mse"] = F.mse_loss(x0_pred_pixel, gt_pixel, reduction='none').mean(dim=[1,2,3]).view(-1)
                 losses["mse"] *= loss_coef[2]
 
+        losses['loss'] = sum(losses.values())
         loss = losses['loss'].mean() / num_grad_accumulate
         if self.amp_scaler is None:
             loss.backward()
@@ -717,7 +721,7 @@ class TrainerDifIRLPIPS(TrainerDifIR):
             self.amp_scaler.scale(loss).backward()
             
 
-        return losses, x0_pred, z_t
+        return losses, z0_pred, z_t
 
 def replace_nan_in_batch(im_lq, im_gt):
     flag_nan = False

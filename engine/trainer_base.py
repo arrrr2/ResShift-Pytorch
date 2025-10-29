@@ -86,7 +86,7 @@ class TrainerBase:
         torch.manual_seed(seed)
         
         # CUDNN settings for reproducibility
-        torch.backends.cudnn.benchmark = not self.configs.train.get('deterministic', False)
+        torch.backends.cudnn.benchmark =  self.configs.train.get('cudnn_benchmark', False)
         torch.backends.cudnn.deterministic = self.configs.train.get('deterministic', False)
         torch.set_float32_matmul_precision("high")
 

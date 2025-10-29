@@ -1,3 +1,9 @@
+An optimized version for repo ResShift. Up to 2x speed working on my 2x4090(48G) GPU.
+Only tested on SR tasks (NeurIPS and Journal version).
+
+## Tips:
+If OOM occurs on 24G gpu, turn off `cudnn_benchmark`.
+
 # ResShift: Efficient Diffusion Model for Image Super-resolution by Residual Shifting (NeurIPS 2023, Spotlight, TPAMI@2025) 
 
 [Zongsheng Yue](https://zsyoaoa.github.io/), [Jianyi Wang](https://iceclear.github.io/), [Chen Change Loy](https://www.mmlab-ntu.com/person/ccloy/) 

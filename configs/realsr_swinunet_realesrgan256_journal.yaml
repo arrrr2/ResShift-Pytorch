@@ -5,7 +5,9 @@ autoencoder:
   target: ldm.models.autoencoder.VQModelTorch
   ckpt_path: weights/autoencoder_vq_f4.pth
   use_fp16: True
+  tune_decoder: False
   params:
+    lora_tune_decoder: False
     embed_dim: 3
     n_embed: 8192
     ddconfig:
@@ -100,8 +102,8 @@ data:
     params:
       dir_paths: []
       txt_file_path: [
-                      '/mnt/sfs-common/zsyue/database/ImageNet/files_txt/path_train_all.txt', 
-                      '/mnt/sfs-common/zsyue/database/FFHQ/files_txt/files256.txt',
+                      '/home/ubuntu/data/datasets/ffhq256_10000.txt', 
+                      '/home/ubuntu/data/datasets/imagenet256.txt',
                      ] 
       im_exts: ['JPEG', ]
       io_backend:
@@ -134,7 +136,7 @@ data:
     params:
       dir_path: testdata/Val_SR/lq
       im_exts: png
-      transform_type: default
+      transform_type: none
       transform_kwargs:
           mean: 0.5
           std: 0.5
@@ -152,8 +154,8 @@ train:
   lr_schedule: cosin
   warmup_iterations: 5000
   # dataloader
-  batch: [96, 8]                
-  microbatch: 12
+  batch: [64, 4]                
+  microbatch: 24
   num_workers: 6
   prefetch_factor: 2            
   # optimization settings
@@ -161,14 +163,14 @@ train:
   ema_rate: 0.999
   iterations: 400000            # total iterations
   # save logging
-  save_freq: 10000
-  log_freq: [200, 2000, 1]         # [training loss, training images, val images]
+  save_freq: 100000
+  log_freq: [200, 2000, 8]         # [training loss, training images, val images]
   loss_coef: [1.0, 1.0]         # [mse, lpips]
   local_logging: True           # manually save images
   tf_logging: False             # tensorboard logging
   # validation settings
   use_ema_val: True            
-  val_freq: ${train.save_freq}
+  val_freq: 20000
   val_y_channel: True
   val_resolution: ${model.params.lq_size}
   val_padding_mode: reflect
@@ -178,5 +180,5 @@ train:
   global_seeding: False
   # model compile
   compile:
-    flag: False
-    mode: reduce-overhead      # default, reduce-overhead
+    flag: True
+    mode: max-autotune      # default, reduce-overhead

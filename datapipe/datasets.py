@@ -56,6 +56,8 @@ def get_transforms(transform_type, kwargs):
         scale, out_shape: for Bicubic
         min_max: tuple or list with length 2, for cliping
     '''
+    if transform_type == 'none':
+        transform_type = thv.transforms.Compose([])
     if transform_type == 'default':
         transform = thv.transforms.Compose([
             thv.transforms.ToTensor(),
@@ -188,14 +190,14 @@ class BaseData(Dataset):
 
     def __getitem__(self, index):
         im_path_base = self.file_paths[index]
-        im_base = util_image.imread(im_path_base, chn='rgb', dtype='float32')
+        im_base = util_image.imread(im_path_base, chn='rgb', dtype='uint8')
 
         im_target = self.transform(im_base)
         out = {'image':im_target, 'lq':im_target}
 
         if self.extra_dir_path is not None:
             im_path_extra = Path(self.extra_dir_path) / Path(im_path_base).name
-            im_extra = util_image.imread(im_path_extra, chn='rgb', dtype='float32')
+            im_extra = util_image.imread(im_path_extra, chn='rgb', dtype='uint8')
             im_extra = self.extra_transform(im_extra)
             out['gt'] = im_extra
 
