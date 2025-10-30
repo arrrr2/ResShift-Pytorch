@@ -56,9 +56,10 @@ def get_transforms(transform_type, kwargs):
         scale, out_shape: for Bicubic
         min_max: tuple or list with length 2, for cliping
     '''
-    if transform_type == 'none':
-        transform_type = thv.transforms.Compose([])
-    if transform_type == 'default':
+    if transform_type == 'no_transform':
+        transform = thv.transforms.Compose([])
+
+    elif transform_type == 'default':
         transform = thv.transforms.Compose([
             thv.transforms.ToTensor(),
             thv.transforms.Normalize(mean=kwargs.get('mean', 0.5), std=kwargs.get('std', 0.5)),
@@ -119,7 +120,7 @@ def get_transforms(transform_type, kwargs):
             thv.transforms.Normalize(mean=kwargs.get('mean', 0.5), std=kwargs.get('std', 0.5)),
         ])
     else:
-        raise ValueError(f'Unexpected transform_variant {transform_variant}')
+        raise ValueError(f'Unexpected transform_variant {transform_type}')
     return transform
 
 def create_dataset(dataset_config):

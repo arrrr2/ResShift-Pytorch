@@ -7,3 +7,4 @@ results/
 *.pickle
 *.json
 *.log
+*.png

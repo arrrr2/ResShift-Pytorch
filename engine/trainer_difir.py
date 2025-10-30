@@ -328,6 +328,7 @@ class TrainerDifIR(TrainerBase):
         elif phase == 'val':
             offset = self.configs.train.get('val_resolution', 256)
             for key, value in data.items():
+                value = value.permute(0, 3, 1, 2)
                 value = value.to(dtype=dtype) / 255.
                 h, w = value.shape[2:]
                 if h > offset and w > offset:

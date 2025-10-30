@@ -287,7 +287,7 @@ class TrainerBase:
                                                   batch_size=self.configs.train.batch[1],
                                                   shuffle=False,
                                                   drop_last=False,
-                                                  num_workers=0,
+                                                  num_workers=1,
                                                   pin_memory=True,
                                                  )
 
